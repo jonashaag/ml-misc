@@ -77,7 +77,10 @@ del kernel
 
 
 # Wiener deconvolution initialization.
-# If you skip this, training below takes longer, but will still converge.
+# If you skip this, training will still converge, but take longer.
+# If you are using a batch dimension (see below), pass only a single element
+# to wiener_deconvolution() here, or somehow interpolate the multiple results
+# from multiple calls to wiener_deconvolution() into a single result of shape (k,)).
 kernel_deconvolved_wiener = wiener_deconvolution(
     convolved,
     signal[kernel_shape[0] - 1:] if PADDING == "valid" else NotImplemented,
@@ -86,14 +89,18 @@ kernel_deconvolved_wiener = wiener_deconvolution(
 
 
 # We train a model to transform 'signal' into 'convolved'.
+# The model also supports batching: You may provide multiple pairs of 'signal'
+# and 'convolved' through an optional batch dimension (first dimension), in
+# which case the model will try to find a 'kernel' that fits all of the pairs.
 ds = tf.data.Dataset.zip(
     (
-        tf.data.Dataset.from_tensors(signal.reshape((-1, 1))),
-        tf.data.Dataset.from_tensors(convolved.reshape((-1, 1))),
+        tf.data.Dataset.from_tensors(signal),
+        tf.data.Dataset.from_tensors(convolved[..., kernel_shape[0]:]),
     )
 )
 
-inp = tf.keras.Input(shape=(*signal.shape, 1))
+inp = tf.keras.Input(shape=signal.shape[-1:])
+inp_chan = tf.expand_dims(inp, -1)
 kernel_r = tf.keras.layers.Conv1D(
     1,
     kernel_shape,
@@ -102,9 +109,10 @@ kernel_r = tf.keras.layers.Conv1D(
     use_bias=False,
     # Remove the 'kernel_initializer' argument if not using Wiener initialization.
     kernel_initializer=tf.constant_initializer(
+        # TensorFlow convolution kernels are flipped
         kernel_deconvolved_wiener[::-1].reshape(-1, 1, 1)
     ),
-)(inp)
+)(inp_chan)[..., 0]
 model = tf.keras.Model(inputs=inp, outputs=kernel_r)
 
 
@@ -117,3 +125,6 @@ print("Error before refinement:", model.evaluate(ds.batch(1)))
 model.fit(
     ds.repeat().batch(1), steps_per_epoch=100_000,
 )
+
+# Reconstructed 'kernel' in SciPy order
+tf.reshape(model.weights[0], kernel_shape)[...,::-1]
